@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using EnvelopeGenerator.Core.Services;
 
 namespace EnvelopeGenerator.Core;
 
@@ -12,6 +13,8 @@ public class EnvelopeProcessManager
     private readonly long? _familyCode;
     private readonly int? _closureNumber;
     private readonly long? _voucherGroup;
+    private string _connectionString;
+    private Services.EnvelopeGenerator? _generator;
     
     public EnvelopeProcessManager(
         string odbcName,
@@ -33,18 +36,51 @@ public class EnvelopeProcessManager
         _voucherGroup = voucherGroup;
     }
 
+    private void InitializeServices()
+    {
+        // TODO: להחליף את זה כשיתווסף OdbcConverter
+        // var odbcConvert = new OdbcConverter.OdbcConverter();
+        // _connectionString = odbcConvert.GetSqlConnectionString(_odbcName, "", "");
+        _connectionString = "Server=localhost;Database=test;Trusted_Connection=True;"; // זמני
+        _generator = new Services.EnvelopeGenerator(_connectionString);
+    }
+
     public bool GenerateEnvelopes(out string errorMessage)
     {
         errorMessage = string.Empty;
         try
         {
-            // TODO: Implement envelope generation logic
-            return true;
+            // יצירת תיקיית פלט
+            var outputPath = Path.Combine(
+                AppDomain.CurrentDomain.BaseDirectory, 
+                $"Mtf_{DateTime.Now:yyyyMMdd_HHmmss}");
+            Directory.CreateDirectory(outputPath);
+
+            // אתחול שירותים
+            InitializeServices();
+
+            if (_generator == null)
+            {
+                throw new InvalidOperationException("Failed to initialize services");
+            }
+
+            // הפעלת תהליך היצירה
+            var result = _generator.GenerateEnvelopes(
+                _actionType,
+                _envelopeType,
+                _batchNumber,
+                _isYearly,
+                _familyCode,
+                _closureNumber,
+                _voucherGroup,
+                outputPath).GetAwaiter().GetResult();
+
+            return result;
         }
         catch (Exception ex)
         {
             errorMessage = TraceException(ex.Message);
-            Console.WriteLine(errorMessage);  // Temporary logging to console
+            Console.WriteLine(errorMessage);
             return false;
         }
     }
