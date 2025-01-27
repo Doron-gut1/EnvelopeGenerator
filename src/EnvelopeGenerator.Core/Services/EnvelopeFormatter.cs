@@ -1,162 +1,156 @@
 using System.Text;
+using System.Data.Common;
+using EnvelopeGenerator.Core.Models;
 using Microsoft.Data.SqlClient;
 
 namespace EnvelopeGenerator.Core.Services;
 
 /// <summary>
-/// Handles exact formatting of envelope lines to match Access output
+/// Formatter that exactly matches Access output format
 /// </summary>
+// Services/EnvelopeFormatter.cs
 public class EnvelopeFormatter
 {
     private readonly HebrewEncoder _hebrewEncoder;
     private readonly EnvelopeStructure _structure;
-    
+
     public EnvelopeFormatter(EnvelopeStructure structure)
     {
         _structure = structure;
         _hebrewEncoder = new HebrewEncoder();
     }
 
-    public string FormatLine(SqlDataReader reader)
+      public string FormatLine(DbDataReader reader)  // שינוי מ-DbDataReader  ל-DbDataReader
     {
-        var line = new StringBuilder();
-        foreach (var field in _structure.Fields.OrderBy(f => f.Order))
+        StringBuilder line = new();
+        foreach (var field in _structure.Fields.OrderBy(f => f.RealSeder))
         {
-            var formattedField = FormatField(reader, field);
+            string formattedField = FormatField(reader, field);
             line.Append(formattedField);
         }
         return line.ToString();
     }
 
-    private string FormatField(SqlDataReader reader, FieldDefinition field)
+    private string FormatField(DbDataReader reader, EnvelopeField field)
     {
-        // Handle simanenu and rek fields exactly as Access does
-        if (InStr(field.Name, "simanenu") > 0 || InStr(field.Name, "rek") > 0)
+        // בדיקת שדות מיוחדים simanenu ו-rek
+        if (field.InName.Contains("simanenu", StringComparison.OrdinalIgnoreCase) ||
+            field.InName.Contains("rek", StringComparison.OrdinalIgnoreCase))
         {
-            return GetPaddedEmptyValue(field);
+            return new string(field.FldType == 1 ? ' ' : '0', field.Length);
         }
 
-        // Handle negative voucher numbers exactly as Access does
-        if (field.Name.StartsWith("shovar", StringComparison.OrdinalIgnoreCase))
+        // טיפול במספרי שוברים שליליים
+        if (field.InName.StartsWith("shovar", StringComparison.OrdinalIgnoreCase))
         {
-            var value = GetValue(reader, field.Name);
-            if (value != null && decimal.TryParse(value.ToString(), out decimal numValue) && numValue < 0)
+            try
             {
-                return String(field.Length, '0');
+                var ordinal = reader.GetOrdinal(field.InName);
+                if (!reader.IsDBNull(ordinal))
+                {
+                    var currValue = reader.GetValue(ordinal);
+                    if (decimal.TryParse(currValue.ToString(), out decimal numValue) && numValue < 0)
+                    {
+                        return new string('0', field.Length);
+                    }
+                }
+            }
+            catch
+            {
+                // אם השדה לא קיים, נתעלם
             }
         }
 
-        var rawValue = GetValue(reader, field.Name);
-        if (rawValue == null || rawValue == DBNull.Value)
+        // קבלת ערך השדה
+        string value = GetFieldValue(reader, field);
+        if (string.IsNullOrEmpty(value))
         {
-            return GetPaddedEmptyValue(field);
+            return new string(field.FldType == 1 || field.FldType == 3 ? ' ' : '0', field.Length);
         }
 
-        string formattedValue = rawValue.ToString() ?? string.Empty;
-
-        // Format based on field type with exact Access compatibility
-        return field.Type switch
+        // פורמט לפי סוג השדה
+        return field.FldType switch
         {
-            1 => FormatTextField(formattedValue, field),
-            2 => FormatNumericField(rawValue, field),
-            3 => FormatCurrencyField(rawValue, field),
-            _ => GetPaddedEmptyValue(field)
+            1 => FormatTextField(value, field),
+            2 => FormatNumericField(value, field),
+            3 => FormatCurrencyField(value, field),
+            _ => new string(' ', field.Length)
         };
     }
 
-    private string FormatTextField(string value, FieldDefinition field)
+    private string FormatTextField(string value, EnvelopeField field)
     {
-        if (string.IsNullOrEmpty(value))
-            return String(field.Length, ' ');
-
-        // Special handling for hadpasadt exactly as Access does
-        if (field.Name.Equals("hadpasadt", StringComparison.OrdinalIgnoreCase))
+        // טיפול בתאריך הדפסה
+        if (field.InName.Equals("hadpasadt", StringComparison.OrdinalIgnoreCase) &&
+            DateTime.TryParse(value, out DateTime date))
         {
-            if (DateTime.TryParse(value, out DateTime date))
-            {
-                value = date.ToString("dd/MM/yyyy");
-            }
-        }
-        
-        // DOS Hebrew encoding exactly as Access does
-        if (_structure.DosHebrewEncoding && !field.Name.Equals("TikToshavLink", StringComparison.OrdinalIgnoreCase))
-        {
-            value = _hebrewEncoder.ConvertToDos(value);
-            if (_structure.ReverseHebrew)
-            {
-                value = _hebrewEncoder.ReverseHebrew(value);
-            }
+            value = date.ToString("dd/MM/yyyy");
         }
 
-        // Trim and pad exactly as Access does using Right function
+        // טיפול בקידוד עברית
+        value = _hebrewEncoder.FormatHebrewField(
+            value,
+            _structure.DosHebrewEncoding,
+            _structure.ReverseHebrew,
+            field.InName.Equals("TikToshavLink", StringComparison.OrdinalIgnoreCase));
+
+        // קיצור וריפוד בדיוק כמו באקסס
         value = Left(value, field.Length);
-        return Right(String(field.Length, ' ') + value, field.Length);
+        return Right(new string(' ', field.Length) + value, field.Length);
     }
 
-    private string FormatNumericField(object value, FieldDefinition field)
+    private string FormatNumericField(string value, EnvelopeField field)
     {
-        if (value is DateTime date)
+        // טיפול בתאריכים
+        if (DateTime.TryParse(value, out DateTime date))
         {
-            // Format dates exactly as Access does
-            return Right(String(field.Length, '0') + date.ToString("ddMMyy"), field.Length);
+            return Right(new string('0', field.Length) + date.ToString("ddMMyy"), field.Length);
         }
 
-        var strValue = value.ToString() ?? string.Empty;
-        return Right(String(field.Length, '0') + strValue, field.Length);
+        // טיפול במספרים רגילים
+        return Right(new string('0', field.Length) + value, field.Length);
     }
 
-    private string FormatCurrencyField(object value, FieldDefinition field)
+    private string FormatCurrencyField(string value, EnvelopeField field)
     {
-        if (!decimal.TryParse(value.ToString(), out decimal amount))
+        if (!decimal.TryParse(value, out decimal amount))
         {
-            return String(field.Length, ' ');
+            return new string(' ', field.Length);
         }
 
-        // Format with exact decimal digits as specified in structure
-        string format = _structure.NumOfDigits > 0 
-            ? "0." + String(_structure.NumOfDigits, '0')
+        string format = _structure.NumOfDigits > 0
+            ? "0." + new string('0', _structure.NumOfDigits)
             : "0";
-            
-        var formatted = amount.ToString(format);
-        return Right(String(field.Length, ' ') + formatted, field.Length);
+
+        string formatted = amount.ToString(format);
+        return Right(new string(' ', field.Length) + formatted, field.Length);
     }
 
-    private string GetPaddedEmptyValue(FieldDefinition field)
+    private static string GetFieldValue(DbDataReader  reader, EnvelopeField field)
     {
-        return field.Type == 1 || field.Type == 3 
-            ? String(field.Length, ' ') 
-            : String(field.Length, '0');
+        try
+        {
+            var ordinal = reader.GetOrdinal(field.InName);
+            if (reader.IsDBNull(ordinal))
+                return string.Empty;
+
+            return reader.GetValue(ordinal).ToString() ?? string.Empty;
+        }
+        catch
+        {
+            return string.Empty;
+        }
     }
 
-    // Access-compatible string functions
-    private static string String(int length, char character) => new(character, length);
-    
     private static string Left(string value, int length)
     {
         if (string.IsNullOrEmpty(value)) return string.Empty;
         return value.Length <= length ? value : value[..length];
     }
-    
+
     private static string Right(string value, int length)
     {
         if (string.IsNullOrEmpty(value)) return string.Empty;
         return value.Length <= length ? value.PadLeft(length) : value[^length..];
-    }
-
-    private static int InStr(string value, string search)
-    {
-        return value.IndexOf(search, StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static object? GetValue(SqlDataReader reader, string fieldName)
-    {
-        try
-        {
-            return reader[fieldName];
-        }
-        catch
-        {
-            return null;
-        }
     }
 }
