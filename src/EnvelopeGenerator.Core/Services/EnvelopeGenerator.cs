@@ -4,6 +4,7 @@ using Dapper;
 using EnvelopeGenerator.Core.Models;
 using System.Runtime.CompilerServices;
 using System.Data.Common;
+using System.Data;
 
 namespace EnvelopeGenerator.Core.Services;
 
@@ -24,13 +25,13 @@ public class EnvelopeGenerator
     }
 
     public async Task<(bool Success, string ErrorMessage)> GenerateFiles(
-        int actionType,
-        int batchNumber,
-        bool isYearly,
-        long? familyCode,
-        int? closureNumber,
-        long? voucherGroup,
-        string outputPath)
+     int actionType,
+     int batchNumber,
+     bool isYearly,
+     long? familyCode,
+     int? closureNumber,
+     long? voucherGroup,
+     string outputPath)
     {
         try
         {
@@ -51,25 +52,53 @@ public class EnvelopeGenerator
 
             try
             {
+                // הכנת פרמטרים לשאילתא
+                var parameters = new DynamicParameters();
+                parameters.Add("@batchNumber", batchNumber);
+                parameters.Add("@familyCode", familyCode, dbType: DbType.Int64);
+                parameters.Add("@closureNumber", closureNumber, dbType: DbType.Int32);
+                parameters.Add("@voucherGroup", voucherGroup, dbType: DbType.Int64);
+
                 // עיבוד הנתונים
                 await using var connection = new SqlConnection(_connectionString);
-                await using var reader = await connection.ExecuteReaderAsync(query);
+                await connection.OpenAsync();
 
+                using var command = new SqlCommand(query, connection);
+                command.Parameters.AddWithValue("@batchNumber", batchNumber);
+                command.Parameters.AddWithValue("@familyCode", (object)familyCode ?? DBNull.Value);
+                if (closureNumber.HasValue)
+                    command.Parameters.AddWithValue("@closureNumber", closureNumber.Value);
+                if (voucherGroup.HasValue)
+                    command.Parameters.AddWithValue("@voucherGroup", voucherGroup.Value);
+
+                await using var reader = await command.ExecuteReaderAsync();
                 await ProcessData(reader, files, actionType, isYearly);
 
                 return (true, string.Empty);
             }
             finally
             {
+                // סגירת כל הקבצים
                 foreach (var file in files.Values)
                 {
                     await file.DisposeAsync();
                 }
             }
         }
+        catch (SqlException sqlEx)
+        {
+            // טיפול בשגיאות SQL ספציפיות
+            return (false, $"Database error: {sqlEx.Message}. Number: {sqlEx.Number}");
+        }
+        catch (IOException ioEx)
+        {
+            // טיפול בשגיאות קבצים
+            return (false, $"File operation error: {ioEx.Message}");
+        }
         catch (Exception ex)
         {
-            return (false, ex.Message);
+            // טיפול בשגיאות כלליות
+            return (false, $"Unexpected error: {ex.Message}");
         }
     }
 

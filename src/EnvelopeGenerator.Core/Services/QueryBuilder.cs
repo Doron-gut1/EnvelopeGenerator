@@ -10,24 +10,24 @@ namespace EnvelopeGenerator.Core.Services
     public class QueryBuilder
     {
         public string BuildDynamicQuery(
-            EnvelopeStructure structure,
-            int actionType,
-            int batchNumber,
-            long? familyCode,
-            int? closureNumber,
-            long? voucherGroup,
-            bool isYearly)
+      EnvelopeStructure structure,
+      int actionType,
+      int batchNumber,
+      long? familyCode,
+      int? closureNumber,
+      long? voucherGroup,
+      bool isYearly)
         {
             var sb = new StringBuilder();
             sb.Append("SELECT ");
 
-            // השדות הבסיסיים בדיוק כמו באקסס
+            // השדות הבסיסיים - בדיוק כמו באקסס
             sb.Append("shovarhead.mspkod, shovarhead.manahovnum, shovarlines.mtfnum, shovarhead.shovarmsp");
 
-            // שדות נוספים לפי סוג הפעולה
+            // שדות נוספים בהתאם לסוג הפעולה
             if ((actionType == 1 && isYearly) || actionType == 3)
             {
-                sb.Append(", IIF(Nz(shovarhead.shovarmsp, 0) = 0, shovarhead.hskod, '0') As miun");
+                sb.Append(", IIF(ISNULL(shovarhead.shovarmsp, 0) = 0, shovarhead.hskod, '0') AS miun");
             }
             if (actionType == 3)
             {
@@ -38,58 +38,86 @@ namespace EnvelopeGenerator.Core.Services
                 sb.Append(", shovarhead.shnati");
             }
 
-            // הוספת שדות דינמית לפי מבנה ה-mivnemtf
+            // מעבר על כל השדות מטבלת mivnemtf
+            bool hasActTeur = structure.Fields.Any(f => f.InName.Equals("actteur", StringComparison.OrdinalIgnoreCase));
+            int boundOfArrays = hasActTeur ?
+                structure.Fields.Max(f => f.RealSeder) + (structure.NumOfPerutFields * (structure.NumOfPerutLines - 1)) :
+                structure.Fields.Max(f => f.RealSeder);
+
+            var processedFields = new HashSet<string>(); // למנוע כפילויות
+
             foreach (var field in structure.Fields.OrderBy(f => f.RealSeder))
             {
+                if (processedFields.Contains(field.InName))
+                    continue;
+
                 // דילוג על שדות מיוחדים
                 if (field.InName.Contains("simanenu", StringComparison.OrdinalIgnoreCase) ||
                     field.InName.Contains("rek", StringComparison.OrdinalIgnoreCase))
                     continue;
 
-                // טיפול מיוחד בשדות פירוט
+                // טיפול בשדות פירוט
                 if (field.InName.Equals("sugtssum", StringComparison.OrdinalIgnoreCase))
                 {
-                    for (int i = 1; i <= structure.NumOfPerutLines; i++)
+                    for (int j = 1; j <= structure.NumOfPerutLines; j++)
                     {
-                        sb.AppendLine($", shovarlines.sm{i}, shovarlines.sugts{i}, shovarlines.sugtsname{i}, shovarlines.teur{i}");
+                        sb.AppendLine($", shovarlines.sm{j}");
+                        sb.AppendLine($", shovarlines.sugts{j}");
+                        sb.AppendLine($", shovarlines.sugtsname{j}");
+                        if (structure.NumOfPerutFields == 5)
+                        {
+                            sb.AppendLine($", shovarlines.simanenu{j}");
+                        }
+                        sb.AppendLine($", shovarlines.teur{j}");
                     }
                     continue;
+
                 }
 
                 // הוספת שדה רגיל
                 var tablePrefix = GetTablePrefix(field.Recordset);
-                sb.Append($", {tablePrefix}.{field.InName}");
+                if (field.InName.Equals("ktoveths", StringComparison.OrdinalIgnoreCase) &&
+                    !processedFields.Contains("ktoveths2"))
+                {
+                    sb.Append($", {tablePrefix}.{field.InName} AS ktoveths2");
+                    processedFields.Add("ktoveths2");
+                    continue;
+                }
+                processedFields.Add(field.InName);
             }
 
-            // הוספת חלק ה-FROM בדיוק כמו באקסס
+            // חלק ה-FROM זהה לאקסס
             sb.Append(@" FROM ((shovarhead 
-            INNER JOIN shovarlines ON shovarhead.shovar = shovarlines.shovar) 
-            LEFT JOIN shovarheadnx ON shovarhead.shovar = shovarheadnx.shovar)
-            LEFT JOIN shovarheadDynamic ON shovarhead.shovar = shovarheadDynamic.shovar");
+        INNER JOIN shovarlines ON shovarhead.shovar = shovarlines.shovar) 
+        LEFT JOIN shovarheadnx ON shovarhead.shovar = shovarheadnx.shovar) 
+        LEFT JOIN shovarheadDynamic ON shovarhead.shovar = shovarheadDynamic.shovar");
 
-            // תנאי WHERE בדיוק כמו באקסס
+            // תנאי WHERE עם טיפול ב-NULL
             sb.Append(" WHERE shovarhead.mnt = @batchNumber")
-              .Append(" AND (sndto < CASE WHEN ISNULL((SELECT PrintEmailMtf FROM param3), 0) = 0 THEN 3 ELSE 4 END OR shnati <> 0)");
+              .Append(" AND (sndto < ")
+              .Append("CASE WHEN ISNULL((SELECT PrintEmailMtf FROM param3), 0) = 0 THEN 3 ELSE 4 END")
+              .Append(" OR ISNULL(shnati, 0) <> 0)");
 
+            // תנאים נוספים עם טיפול בפרמטרים אופציונליים
             if (familyCode.HasValue)
                 sb.Append(" AND shovarhead.mspkod = @familyCode");
             if (closureNumber.HasValue)
-                sb.Append(" AND shovarhead.sgrnum = @closureNumber");
+                sb.Append(" AND ISNULL(shovarhead.sgrnum, 0) = @closureNumber");
             if (voucherGroup.HasValue)
-                sb.Append(" AND shovarhead.kvuzashovar = @voucherGroup");
+                sb.Append(" AND ISNULL(shovarhead.kvuzashovar, 0) = @voucherGroup");
             else
-                sb.Append(" AND shovarhead.kvuzashovar = 0");
+                sb.Append(" AND ISNULL(shovarhead.kvuzashovar, 0) = 0");
 
-            // ORDER BY בדיוק כמו באקסס
+            // ORDER BY - מותאם לפי סוג הפעולה
             if (actionType == 1 && isYearly)
             {
                 sb.Append(@" ORDER BY 
-                shovarhead.nameinsvr, 
-                shovarhead.mspkod, 
-                IIF(Nz(shovarhead.shovarmsp, 0) = 0, shovarhead.hskod, '0'),
-                shovarhead.kvuzashovar, 
-                shovarlines.mtfnum, 
-                IIF(shovarhead.shnati = True, 1, 0)");
+            shovarhead.nameinsvr, 
+            shovarhead.mspkod, 
+            IIF(ISNULL(shovarhead.shovarmsp, 0) = 0, shovarhead.hskod, '0'),
+            shovarhead.kvuzashovar, 
+            shovarlines.mtfnum, 
+            IIF(ISNULL(shovarhead.shnati, 0) = 1, 1, 0)");
             }
             else if (actionType == 1 || actionType == 2)
             {
@@ -98,11 +126,11 @@ namespace EnvelopeGenerator.Core.Services
             else
             {
                 sb.Append(@" ORDER BY 
-                shovarhead.nameinsvr, 
-                shovarhead.mspkod, 
-                IIF(Nz(shovarhead.shovarmsp, 0) = 0, shovarhead.hskod, '0'), 
-                shovarlines.mtfnum, 
-                shovarhead.manahovnum");
+            shovarhead.nameinsvr, 
+            shovarhead.mspkod, 
+            IIF(ISNULL(shovarhead.shovarmsp, 0) = 0, shovarhead.hskod, '0'), 
+            shovarlines.mtfnum, 
+            shovarhead.manahovnum");
             }
 
             return sb.ToString();
@@ -117,6 +145,6 @@ namespace EnvelopeGenerator.Core.Services
             5 => "shovarheadDynamic",
             _ => throw new ArgumentException($"Unknown source: {source}")
         };
-    }
 
+    }
 }
